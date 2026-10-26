@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Lab Microscope</title>
+  <meta name="description" content="Browser viewer for the AVEO Cheetah3 USB microscope (Traveller 6803), using WebUSB.">
+  <link data-trunk rel="css" href="style.css">
+  <link data-trunk rel="rust" data-bin="scope-web" data-wasm-opt="z">
+</head>
+<body>
+  <header>
+    <div class="brand">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="4"/></svg>
+      <h1>Lab Microscope</h1>
+    </div>
+    <span id="status" class="status off">Starting…</span>
+  </header>
+
+  <div id="unsupported" class="banner" hidden>
+    This browser has no WebUSB. Open this page in Chrome or Edge on a desktop computer.
+  </div>
+
+  <main>
+    <section class="viewer">
+      <div class="frame">
+        <canvas id="view" width="640" height="480"></canvas>
+      </div>
+      <div class="viewer-bar">
+        <span id="stats">No signal</span>
+        <button id="snapshot" class="secondary">Save snapshot</button>
+      </div>
+    </section>
+
+    <aside>
+      <section class="panel">
+        <h2><span class="step">1</span>Firmware</h2>
+        <p id="fw-status" class="fw missing">Not loaded.</p>
+        <label class="file">
+          <input id="fw-file" type="file">
+          <span>Choose a file from the CD…</span>
+        </label>
+        <p class="hint">Pick the driver file (<code>.sys</code>, <code>.dll</code>, <code>.bin</code>) from the original CD.
+          It is searched for the firmware image and remembered in this browser. It is never uploaded anywhere.</p>
+      </section>
+
+      <section class="panel">
+        <h2><span class="step">2</span>Device</h2>
+        <div class="row">
+          <button id="connect">Connect</button>
+          <button id="start" disabled>Start</button>
+          <button id="stop" class="secondary" disabled>Stop</button>
+        </div>
+        <div class="fields">
+          <label>Resolution
+            <select id="resolution">
+              <option value="vga" selected>640 × 480</option>
+              <option value="sxga">1280 × 1024 (experimental)</option>
+            </select>
+          </label>
+          <label>Byte order
+            <select id="order">
+              <option value="uyvy" selected>UYVY</option>
+              <option value="yuyv">YUYV</option>
+            </select>
+          </label>
+        </div>
+      </section>
+
+      <section class="panel">
+        <h2><span class="step">3</span>Image</h2>
+        <div id="controls" data-enabled="0"></div>
+        <p class="hint">Ranges are provisional. The LED is set by the switch on the microscope.</p>
+      </section>
+
+      <details class="panel help">
+        <summary>First-time setup on Windows</summary>
+        <ol>
+          <li>Install <a href="https://zadig.akeo.ie/" target="_blank" rel="noopener">Zadig</a> and plug in the microscope.</li>
+          <li>Options → List All Devices, select the device with ID <code>1871 01B0</code>.</li>
+          <li>Choose <strong>WinUSB</strong> as the driver and press Replace Driver.</li>
+          <li>Reload this page and press Connect.</li>
+        </ol>
+        <p>On Linux, add a udev rule granting access to <code>1871:01b0</code>. macOS needs nothing extra.</p>
+      </details>
+
+      <section class="panel">
+        <h2>Log</h2>
+        <div id="log"></div>
+      </section>
+    </aside>
+  </main>
+</body>
+</html>

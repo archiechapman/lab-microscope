@@ -1,0 +1,5 @@
+/target
+/dist
+# Firmware is Aveo's proprietary code. Never commit it.
+*.bin
+aveo_firmware.h

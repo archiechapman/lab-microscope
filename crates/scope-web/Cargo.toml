@@ -1,0 +1,27 @@
+[package]
+name = "scope-web"
+description = "Browser front end (WebUSB + WebAssembly) for the AVEO Cheetah3 USB microscope"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+scope-core = { path = "../scope-core" }
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+console_error_panic_hook = "0.1"
+
+[dependencies.web-sys]
+version = "0.3"
+features = [
+  "console", "Window", "Document", "Element", "HtmlElement", "Navigator",
+  "HtmlCanvasElement", "CanvasRenderingContext2d", "ImageData",
+  "HtmlInputElement", "HtmlButtonElement", "HtmlSelectElement", "HtmlAnchorElement",
+  "Event", "EventTarget", "File", "FileList", "Blob", "Storage",
+  "Usb", "UsbDevice", "UsbDeviceFilter", "UsbDeviceRequestOptions",
+  "UsbControlTransferParameters", "UsbRequestType", "UsbRecipient",
+  "UsbInTransferResult", "UsbOutTransferResult", "UsbTransferStatus",
+  "UsbIsochronousInTransferResult", "UsbIsochronousInTransferPacket",
+  "UsbConfiguration", "UsbInterface", "UsbAlternateInterface", "UsbEndpoint",
+]
