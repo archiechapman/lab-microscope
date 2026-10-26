@@ -17,7 +17,7 @@ The microscope's bridge chip is an 8051 microcontroller with no non-volatile mem
 - a raw 4,928-byte dump, or
 - a C header listing the bytes as `0xNN` literals.
 
-Images matching a known-good SHA-256 are marked as verified. Moreover, an open replacement firmware is a planned later phase, after which the CD becomes optional.
+The page reports whether an image matches the reference SHA-256 from kswit's published copy. Note that this reference has yet to be confirmed against an original CD, so a match means "identical to kswit's copy" rather than "genuine". Loading a driver file from an original CD is the real test: if it matches, the reference is confirmed. Moreover, an open replacement firmware is a planned later phase, after which the CD becomes optional.
 
 ## How it works
 

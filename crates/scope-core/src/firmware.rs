@@ -17,9 +17,17 @@ pub const FIRMWARE_LEN: usize = FIRMWARE_CHUNKS * FIRMWARE_CHUNK_LEN;
 /// The image begins with "Aveo" followed by 0xFF padding.
 pub const MAGIC: &[u8] = b"Aveo\xff\xff\xff\xff";
 
-/// SHA-256 of firmware images confirmed to work (`Ver R003.001`, MT9M111).
-pub const KNOWN_SHA256: &[&str] =
+/// SHA-256 of the reference image published in kswit/USB_driver
+/// (`Ver R003.001`, MT9M111). This is NOT yet confirmed against an original
+/// vendor CD: a match means "same as kswit's copy", nothing more. Once an
+/// image extracted from an original CD is confirmed to match, record that
+/// here and in `CONFIRMED_AGAINST_VENDOR_MEDIA`.
+pub const REFERENCE_SHA256: &[&str] =
     &["e10c93d603ceea1d2baa773ab793d63714f8ae7e94bade3ebb847bf0c4797c31"];
+
+/// Whether the reference hash has been checked against an image extracted
+/// from original vendor media.
+pub const CONFIRMED_AGAINST_VENDOR_MEDIA: bool = false;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Source {
@@ -31,8 +39,8 @@ pub enum Source {
 pub struct Firmware {
     bytes: Vec<u8>,
     pub sha256: String,
-    /// True when the hash matches a confirmed-good image.
-    pub known: bool,
+    /// True when the hash matches [`REFERENCE_SHA256`].
+    pub matches_reference: bool,
     pub source: Source,
 }
 
@@ -94,7 +102,7 @@ impl Firmware {
         Err(FirmwareError::NotFound)
     }
 
-    /// Prefer a candidate with a known hash, otherwise take the first one.
+    /// Prefer a candidate matching the reference hash, otherwise take the first one.
     fn scan(data: &[u8], source: Source) -> Option<Self> {
         let mut first = None;
         let mut start = 0;
@@ -102,14 +110,14 @@ impl Firmware {
             let at = start + off;
             if let Some(img) = data.get(at..at + FIRMWARE_LEN) {
                 let sha256 = sha256_hex(img);
-                let known = KNOWN_SHA256.contains(&sha256.as_str());
+                let matches_reference = REFERENCE_SHA256.contains(&sha256.as_str());
                 let fw = Firmware {
                     bytes: img.to_vec(),
                     sha256,
-                    known,
+                    matches_reference,
                     source,
                 };
-                if known {
+                if matches_reference {
                     return Some(fw);
                 }
                 first.get_or_insert(fw);
@@ -164,7 +172,7 @@ mod tests {
         let fw = Firmware::extract(&file).unwrap();
         assert_eq!(fw.bytes(), &fake_image()[..]);
         assert_eq!(fw.source, Source::Binary);
-        assert!(!fw.known);
+        assert!(!fw.matches_reference);
         assert_eq!(fw.chunks().count(), FIRMWARE_CHUNKS);
         assert!(fw.description().contains("MT9M111"));
     }
@@ -198,12 +206,12 @@ mod tests {
     /// Checks against the reference image if a copy is available locally.
     /// Set AVEO_FW=/path/to/aveo_firmware.h (or a vendor file) to run it.
     #[test]
-    fn reference_image_is_known() {
+    fn reference_image_matches() {
         let Ok(path) = std::env::var("AVEO_FW") else {
             return;
         };
         let data = std::fs::read(path).unwrap();
         let fw = Firmware::extract(&data).unwrap();
-        assert!(fw.known, "hash {}", fw.sha256);
+        assert!(fw.matches_reference, "hash {}", fw.sha256);
     }
 }

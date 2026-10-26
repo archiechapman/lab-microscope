@@ -9,6 +9,7 @@ use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::rc::Rc;
 
+use scope_core::firmware::CONFIRMED_AGAINST_VENDOR_MEDIA;
 use scope_core::protocol::{self, Resolution};
 use scope_core::{yuv422_to_rgba, ByteOrder, Control, Firmware, FrameAssembler};
 use wasm_bindgen::prelude::*;
@@ -112,9 +113,15 @@ fn set_phase(app: &App, phase: Phase, status: &str) {
 fn show_firmware(app: &App) {
     let st = app.borrow();
     let text = match &st.firmware {
-        Some(fw) if fw.known => format!("Loaded and verified · {}", fw.description()),
+        Some(fw) if fw.matches_reference && CONFIRMED_AGAINST_VENDOR_MEDIA => {
+            format!("Loaded and verified against original vendor media · {}", fw.description())
+        }
+        Some(fw) if fw.matches_reference => format!(
+            "Loaded · matches the kswit reference image (not yet confirmed against an original CD) · {}",
+            fw.description()
+        ),
         Some(fw) => format!(
-            "Loaded, but not a known image (sha256 {}…) · {}",
+            "Loaded · differs from the kswit reference (sha256 {}…) · {}",
             &fw.sha256[..12],
             fw.description()
         ),
@@ -122,7 +129,7 @@ fn show_firmware(app: &App) {
     };
     st.ui.fw_status.set_text_content(Some(&text));
     st.ui.fw_status.set_class_name(match &st.firmware {
-        Some(fw) if fw.known => "fw ok",
+        Some(fw) if fw.matches_reference => "fw ok",
         Some(_) => "fw warn",
         None => "fw missing",
     });
