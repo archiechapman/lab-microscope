@@ -241,8 +241,19 @@ async fn try_connect(app: &App) -> Result<UsbDevice, String> {
         .firmware
         .clone()
         .ok_or("the microscope needs its firmware; load it from the CD first")?;
-    log(app, "Uploading firmware…");
-    usb::upload_firmware(&dev, &fw).await?;
+    // Add the code-memory reader used by Diagnostics. It only takes over the
+    // unused request 0xA0, so normal operation is unaffected.
+    let image = match scope_core::patch::with_code_reader(fw.bytes()) {
+        Some(patched) => {
+            log(app, "Uploading firmware (with diagnostics patch)…");
+            patched
+        }
+        None => {
+            log(app, "Uploading firmware…");
+            fw.bytes().to_vec()
+        }
+    };
+    usb::upload_firmware(&dev, &image).await?;
     app.borrow_mut().fw_uploaded_to = Some(dev.clone());
     let version = usb::read_version(&dev).await?;
     if version.as_slice() != protocol::FIRMWARE_VERSION {

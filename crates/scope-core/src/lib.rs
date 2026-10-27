@@ -11,6 +11,7 @@
 pub mod color;
 pub mod firmware;
 pub mod frame;
+pub mod patch;
 pub mod protocol;
 
 pub use color::{yuv422_to_rgba, ByteOrder};

@@ -1,7 +1,6 @@
 //! Thin async wrappers over WebUSB for this device.
 
 use scope_core::protocol::{self, req, Request, Resolution};
-use scope_core::Firmware;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 use web_sys::{
@@ -154,9 +153,9 @@ pub async fn read_version(dev: &UsbDevice) -> Result<Vec<u8>, String> {
     ctrl_in(dev, req::VERSION, 0, 0, 12).await
 }
 
-pub async fn upload_firmware(dev: &UsbDevice, fw: &Firmware) -> Result<(), String> {
-    for (i, chunk) in fw.chunks() {
-        ctrl_out_data(dev, req::FIRMWARE_CHUNK, 0, i, chunk).await?;
+pub async fn upload_firmware(dev: &UsbDevice, image: &[u8]) -> Result<(), String> {
+    for (i, chunk) in image.chunks_exact(protocol::FIRMWARE_CHUNK_LEN).enumerate() {
+        ctrl_out_data(dev, req::FIRMWARE_CHUNK, 0, i as u16, chunk).await?;
     }
     ctrl_out(dev, &protocol::BOOT_REQUEST).await
 }

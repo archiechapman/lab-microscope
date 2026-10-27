@@ -2,16 +2,13 @@
 //! chip's boot ROM, used to work out how to make the device stream over bulk
 //! transfers (which Chromium supports on Windows) instead of isochronous.
 //!
-//! The dump uses vendor request 0x01, which kswit's tools use with an address
-//! in `wIndex`. Before dumping, we check two things so that we never read
-//! hardware registers with side effects:
-//! 1. reading 0x8000 returns the uploaded firmware header ("Aveo"), proving
-//!    the request reads memory at `wIndex`;
-//! 2. reading 0x0000 looks like an 8051 vector table, proving it reads the
-//!    *code* space (side-effect free), not the register-mapped data space.
+//! Vendor request 0x01 turned out to read the chip's *data* space (registers
+//! at 0x0000), so it cannot reach the ROM. Instead, the firmware is uploaded
+//! with a small patch (see `scope_core::patch`) that makes request 0xA0
+//! return eight bytes of *code* memory, which has no read side effects.
 
 use scope_core::firmware::MAGIC;
-use scope_core::protocol::req;
+use scope_core::patch::{CODE_READ_LEN, CODE_READ_REQUEST};
 use web_sys::UsbDevice;
 
 use crate::usb;
@@ -83,67 +80,50 @@ fn looks_like_vectors(b: &[u8]) -> bool {
     b.len() >= 4 && is_jump(b[0]) && (is_jump(b[3]) || b[3] == 0x32 || b[3] == 0xFF)
 }
 
-/// Request 0x01 returns one byte of memory at `wIndex`, whatever `wLength` says.
-async fn read_byte(dev: &UsbDevice, addr: u16) -> Result<u8, String> {
-    let b = usb::ctrl_in(dev, req::CAPABILITY, 0, addr, 1).await?;
-    b.first()
-        .copied()
-        .ok_or_else(|| format!("empty read at {addr:04x}"))
+async fn read_code(dev: &UsbDevice, addr: u16) -> Result<Vec<u8>, String> {
+    usb::ctrl_in(dev, CODE_READ_REQUEST, 0, addr, CODE_READ_LEN).await
 }
 
-async fn read_bytes(dev: &UsbDevice, addrs: &[u16]) -> Result<Vec<u8>, String> {
-    let mut out = Vec::with_capacity(addrs.len());
-    for &a in addrs {
-        out.push(read_byte(dev, a).await?);
-    }
-    Ok(out)
-}
-
-/// Probe, then dump the boot ROM one byte at a time. Calls `progress` with log lines.
+/// Dump the boot ROM through the patched firmware's code-memory reader.
+/// Code memory has no read side effects, so no address is unsafe to read.
 pub async fn dump(dev: &UsbDevice, mut progress: impl FnMut(&str)) -> Result<Vec<u8>, String> {
-    let header = read_bytes(
-        dev,
-        &[
-            FIRMWARE_BASE,
-            FIRMWARE_BASE + 1,
-            FIRMWARE_BASE + 2,
-            FIRMWARE_BASE + 3,
-        ],
-    )
-    .await?;
-    progress(&format!("Read @8000..8003: {}", hex(&header)));
-    if header != MAGIC[..4] {
+    let header = read_code(dev, FIRMWARE_BASE).await?;
+    progress(&format!("Code read @8000: {}", hex(&header)));
+    if header.len() != CODE_READ_LEN as usize || !header.starts_with(&MAGIC[..4]) {
         return Err(
-            "request 0x01 did not return the firmware header at 0x8000; \
-                    not dumping. Please send this log."
+            "the diagnostics patch is not active. Unplug the microscope, plug it \
+                    back in, press Connect (the log should say 'with diagnostics patch'), \
+                    then run Diagnostics again."
                 .into(),
         );
     }
-
-    // Only 0x0000 (which the vendor software itself reads) and 0x0003 are
-    // touched before we know which address space this is.
-    let v0 = read_byte(dev, 0x0000).await?;
-    let v3 = read_byte(dev, 0x0003).await?;
-    progress(&format!("Read @0000: {v0:02x}, @0003: {v3:02x}"));
-    if !looks_like_vectors(&[v0, 0, 0, v3]) {
-        return Err(
-            "0x0000 does not look like 8051 code, so request 0x01 may be reading \
-                    hardware registers; stopped for safety. Please send this log."
-                .into(),
-        );
-    }
+    let v = read_code(dev, 0x0000).await?;
+    progress(&format!(
+        "Code read @0000: {}{}",
+        hex(&v),
+        if looks_like_vectors(&v) {
+            " (8051 vectors, as expected)"
+        } else {
+            " (unexpected, continuing)"
+        }
+    ));
 
     let start = js_sys::Date::now();
     let mut out = Vec::with_capacity(ROM_END as usize);
-    for addr in 0..ROM_END {
-        out.push(read_byte(dev, addr as u16).await?);
-        let done = addr + 1;
-        if done.is_multiple_of(0x800) {
+    let mut addr: u32 = 0;
+    while addr < ROM_END {
+        let b = read_code(dev, addr as u16).await?;
+        if b.len() != CODE_READ_LEN as usize {
+            return Err(format!("short read at {addr:04x}: {} bytes", b.len()));
+        }
+        out.extend_from_slice(&b);
+        addr += CODE_READ_LEN as u32;
+        if addr.is_multiple_of(0x800) {
             let secs = (js_sys::Date::now() - start) / 1000.0;
-            let remaining = secs / done as f64 * (ROM_END - done) as f64;
+            let remaining = secs / addr as f64 * (ROM_END - addr) as f64;
             progress(&format!(
-                "Dumped {done:04x} of {ROM_END:04x} ({}%), about {:.0} s left",
-                done * 100 / ROM_END,
+                "Dumped {addr:04x} of {ROM_END:04x} ({}%), about {:.0} s left",
+                addr * 100 / ROM_END,
                 remaining
             ));
         }
