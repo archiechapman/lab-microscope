@@ -63,6 +63,16 @@ pub fn has_bulk_video(dev: &UsbDevice) -> bool {
     })
 }
 
+fn is_microscope(dev: &UsbDevice) -> bool {
+    dev.vendor_id() == protocol::VENDOR_ID && dev.product_id() == protocol::PRODUCT_ID
+}
+
+/// A microscope this page may use without showing the picker, if any.
+pub async fn known_device() -> Option<UsbDevice> {
+    let devices = usb().get_devices().await.ok()?;
+    devices.iter().find(is_microscope)
+}
+
 /// After a reconnect, find the microscope again among the devices this page
 /// may already use. Chrome may drop the permission for a device without a
 /// serial number when it disconnects, in which case this times out.
@@ -74,11 +84,10 @@ pub async fn wait_for_bulk_device(timeout_ms: u32) -> Option<UsbDevice> {
         let Ok(devices) = usb().get_devices().await else {
             continue;
         };
-        if let Some(dev) = devices.iter().find(|d| {
-            d.vendor_id() == protocol::VENDOR_ID
-                && d.product_id() == protocol::PRODUCT_ID
-                && has_bulk_video(d)
-        }) {
+        if let Some(dev) = devices
+            .iter()
+            .find(|d| is_microscope(d) && has_bulk_video(d))
+        {
             return Some(dev);
         }
     }

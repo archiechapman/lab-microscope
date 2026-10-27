@@ -58,6 +58,7 @@ struct Ui {
     canvas: HtmlCanvasElement,
     ctx: CanvasRenderingContext2d,
     log: HtmlElement,
+    log_panel: HtmlElement,
     status: HtmlElement,
     fw_status: HtmlElement,
     stats: HtmlElement,
@@ -111,6 +112,13 @@ fn log(app: &App, msg: &str) {
     let time = js_sys::Date::new_0().to_locale_time_string("en-GB");
     line.set_text_content(Some(&format!("{} {msg}", String::from(time))));
     let _ = st.ui.log.append_child(&line);
+    st.ui.log.set_scroll_top(st.ui.log.scroll_height().into());
+}
+
+/// Unfold the log, which is collapsed by default, so that an error shows.
+fn open_log(app: &App) {
+    let st = app.borrow();
+    let _ = st.ui.log_panel.set_attribute("open", "");
     st.ui.log.set_scroll_top(st.ui.log.scroll_height().into());
 }
 
@@ -213,9 +221,11 @@ async fn on_firmware_file(app: App, input: HtmlInputElement) {
 
 // ---------------------------------------------------------------- device
 
-async fn connect(app: App) {
+/// `known`: a device the page already has permission for (found at
+/// startup); otherwise the browser's picker is shown.
+async fn connect(app: App, known: Option<UsbDevice>) {
     set_phase(&app, Phase::Busy, "Connecting…");
-    let result = try_connect(&app).await;
+    let result = try_connect(&app, known).await;
     app.borrow_mut().reconnecting = false;
     match result {
         Ok(Some((dev, transport))) => {
@@ -236,24 +246,35 @@ async fn connect(app: App) {
         }
         Err(e) => {
             log(&app, &format!("Connect failed: {e}"));
+            open_log(&app);
             set_phase(&app, Phase::Disconnected, "Not connected");
         }
     }
 }
 
+/// Whether the page address contains `word`, as in `?bulk` or `?diag`.
+fn query_has(word: &str) -> bool {
+    web_sys::window()
+        .and_then(|w| w.location().search().ok())
+        .is_some_and(|q| q.contains(word))
+}
+
 /// Use the bulk endpoint where isochronous transfers are unavailable
 /// (Chromium on Windows), or anywhere with `?bulk` in the page address.
 fn want_bulk() -> bool {
-    is_windows()
-        || web_sys::window()
-            .and_then(|w| w.location().search().ok())
-            .is_some_and(|q| q.contains("bulk"))
+    is_windows() || query_has("bulk")
 }
 
 /// `Ok(None)`: the device reconnected for bulk video, but the browser forgot
 /// its permission (it has no serial number), so the user must pick it again.
-async fn try_connect(app: &App) -> Result<Option<(UsbDevice, Transport)>, String> {
-    let dev = usb::request_device().await?;
+async fn try_connect(
+    app: &App,
+    known: Option<UsbDevice>,
+) -> Result<Option<(UsbDevice, Transport)>, String> {
+    let dev = match known {
+        Some(dev) => dev,
+        None => usb::request_device().await?,
+    };
     log(
         app,
         &format!(
@@ -334,7 +355,20 @@ async fn try_connect(app: &App) -> Result<Option<(UsbDevice, Transport)>, String
     if let Err(e) = usb::request_reconnect(&dev).await {
         log(app, &format!("Reconnect request: {e} (waiting anyway)"));
     }
-    match usb::wait_for_bulk_device(RECONNECT_WAIT_MS).await {
+    // Chrome forgets a device without a serial number when it disconnects,
+    // so the reconnected microscope needs the picker again. Show it at once,
+    // while the Connect click still counts as recent (the browser allows a
+    // few seconds); the picker lists the microscope as soon as it is back.
+    usb::sleep(300).await;
+    log(app, "Choose the microscope again to finish connecting");
+    let dev = match usb::request_device().await {
+        Ok(dev) if usb::has_bulk_video(&dev) => Some(dev),
+        Ok(_) => None,
+        // No longer allowed without a click, or cancelled: in case this
+        // browser kept the permission after all, look for the device.
+        Err(_) => usb::wait_for_bulk_device(RECONNECT_WAIT_MS).await,
+    };
+    match dev {
         Some(dev) => {
             usb::open(&dev).await?;
             log(app, "Reconnected with the bulk video endpoint");
@@ -357,6 +391,7 @@ async fn start(app: App) {
     let bulk = transport == Transport::Bulk;
     if let Err(e) = usb::start_stream(&dev, resolution, bulk).await {
         log(&app, &format!("Start failed: {e}"));
+        open_log(&app);
         set_phase(&app, Phase::Ready, "Ready");
         return;
     }
@@ -420,6 +455,7 @@ async fn iso_loop(app: App, dev: UsbDevice, generation: u32) {
             Err(e) => {
                 if is_current(&app, generation) {
                     log(&app, &format!("Stream error: {e}"));
+                    open_log(&app);
                     if is_windows() {
                         log(
                             &app,
@@ -447,6 +483,7 @@ async fn bulk_loop(app: App, dev: UsbDevice, generation: u32) {
             Err(e) => {
                 if is_current(&app, generation) {
                     log(&app, &format!("Stream error: {e}"));
+                    open_log(&app);
                     spawn_local(stop(app.clone()));
                 }
                 return;
@@ -684,6 +721,7 @@ fn main() {
     let ctx: CanvasRenderingContext2d = canvas.get_context("2d").unwrap().unwrap().unchecked_into();
     let ui = Ui {
         log: el(&doc, "log"),
+        log_panel: el(&doc, "log-panel"),
         status: el(&doc, "status"),
         fw_status: el(&doc, "fw-status"),
         stats: el(&doc, "stats"),
@@ -739,7 +777,7 @@ fn main() {
     let st = app.borrow();
     let a = app.clone();
     on(&st.ui.connect, "click", move |_| {
-        spawn_local(connect(a.clone()))
+        spawn_local(connect(a.clone(), None))
     });
     let a = app.clone();
     on(&st.ui.start, "click", move |_| {
@@ -749,6 +787,8 @@ fn main() {
     on(&st.ui.stop, "click", move |_| spawn_local(stop(a.clone())));
     let a = app.clone();
     on(&st.ui.snapshot, "click", move |_| snapshot(&a));
+    // The ROM dump is a development tool: shown only with `?diag`.
+    st.ui.diag.set_hidden(!query_has("diag"));
     let a = app.clone();
     on(&st.ui.diag, "click", move |_| {
         spawn_local(diagnostics(a.clone()))
@@ -765,4 +805,19 @@ fn main() {
     drop(st);
 
     log(&app, "Ready. Plug in the microscope and press Connect.");
+    if usb::supported() {
+        spawn_local(auto_connect(app.clone()));
+    }
+}
+
+/// Connect without a click when the browser still allows this page to use
+/// the microscope, as after a reload while it stays plugged in.
+async fn auto_connect(app: App) {
+    let Some(dev) = usb::known_device().await else {
+        return;
+    };
+    if app.borrow().phase == Phase::Disconnected {
+        log(&app, "Microscope already permitted; connecting");
+        connect(app, Some(dev)).await;
+    }
 }

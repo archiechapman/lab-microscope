@@ -50,7 +50,7 @@
           <button id="connect">Connect</button>
           <button id="start" disabled>Start</button>
           <button id="stop" class="secondary" disabled>Stop</button>
-          <button id="diag" class="secondary" disabled>Diagnostics</button>
+          <button id="diag" class="secondary" disabled hidden>Diagnostics</button>
         </div>
         <div class="fields">
           <label>Resolution
@@ -85,10 +85,10 @@
         <p>On Linux, add a udev rule granting access to <code>1871:01b0</code>. macOS needs nothing extra.</p>
       </details>
 
-      <section class="panel">
-        <h2>Log</h2>
+      <details id="log-panel" class="panel help">
+        <summary>Log</summary>
         <div id="log"></div>
-      </section>
+      </details>
     </aside>
   </main>
 </body>
