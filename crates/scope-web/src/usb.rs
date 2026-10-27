@@ -124,7 +124,7 @@ async fn ctrl_out_data(
     Ok(())
 }
 
-async fn ctrl_in(
+pub async fn ctrl_in(
     dev: &UsbDevice,
     request: u8,
     value: u16,

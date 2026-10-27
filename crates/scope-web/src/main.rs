@@ -3,6 +3,7 @@
 //! Talks to the device directly over WebUSB (Chromium browsers only). On
 //! Windows the device must first be bound to the WinUSB driver (see README).
 
+mod diag;
 mod usb;
 
 use std::cell::RefCell;
@@ -46,6 +47,7 @@ struct Ui {
     start: HtmlButtonElement,
     stop: HtmlButtonElement,
     snapshot: HtmlButtonElement,
+    diag: HtmlButtonElement,
     resolution: HtmlSelectElement,
     order: HtmlSelectElement,
     controls: HtmlElement,
@@ -102,6 +104,7 @@ fn set_phase(app: &App, phase: Phase, status: &str) {
     });
     st.ui.connect.set_disabled(phase != Phase::Disconnected);
     st.ui.start.set_disabled(phase != Phase::Ready);
+    st.ui.diag.set_disabled(phase != Phase::Ready);
     st.ui.stop.set_disabled(phase != Phase::Streaming);
     st.ui.resolution.set_disabled(phase == Phase::Streaming);
     let _ = st.ui.controls.set_attribute(
@@ -212,6 +215,9 @@ async fn try_connect(app: &App) -> Result<UsbDevice, String> {
         ),
     );
     usb::open(&dev).await?;
+    for line in diag::describe(&dev) {
+        log(app, &line);
+    }
 
     // The boot ROM may answer the version request with the same string as the
     // firmware (kswit's tested kernel driver uploads even when it matches), so
@@ -417,6 +423,53 @@ fn send_control(app: &App, control: Control, value: u16) {
     });
 }
 
+async fn diagnostics(app: App) {
+    let Some(dev) = app.borrow().device.clone() else {
+        return;
+    };
+    set_phase(&app, Phase::Busy, "Running diagnostics…");
+    for line in diag::describe(&dev) {
+        log(&app, &line);
+    }
+    log(&app, "Reading the bridge chip's ROM (about a minute)…");
+    let result = diag::dump(&dev, |msg| log(&app, msg)).await;
+    match result {
+        Ok(bytes) => {
+            log(
+                &app,
+                &format!("Done: {} bytes. Saving aveo-rom-dump.bin", bytes.len()),
+            );
+            save_file(&app, "aveo-rom-dump.bin", &bytes);
+        }
+        Err(e) => log(&app, &format!("Diagnostics stopped: {e}")),
+    }
+    set_phase(&app, Phase::Ready, "Ready");
+}
+
+fn save_file(app: &App, name: &str, bytes: &[u8]) {
+    let parts = js_sys::Array::new();
+    parts.push(&js_sys::Uint8Array::new_from_slice(bytes));
+    let opts = web_sys::BlobPropertyBag::new();
+    opts.set_type("application/octet-stream");
+    let Ok(blob) = web_sys::Blob::new_with_u8_array_sequence_and_options(&parts, &opts) else {
+        return log(app, "Could not create the file");
+    };
+    let Ok(url) = web_sys::Url::create_object_url_with_blob(&blob) else {
+        return;
+    };
+    let a: HtmlAnchorElement = app
+        .borrow()
+        .ui
+        .doc
+        .create_element("a")
+        .unwrap()
+        .unchecked_into();
+    a.set_href(&url);
+    a.set_download(name);
+    a.click();
+    let _ = web_sys::Url::revoke_object_url(&url);
+}
+
 fn snapshot(app: &App) {
     let st = app.borrow();
     let Ok(url) = st.ui.canvas.to_data_url_with_type("image/png") else {
@@ -511,6 +564,7 @@ fn main() {
         start: el(&doc, "start"),
         stop: el(&doc, "stop"),
         snapshot: el(&doc, "snapshot"),
+        diag: el(&doc, "diag"),
         resolution: el(&doc, "resolution"),
         order: el(&doc, "order"),
         controls: el(&doc, "controls"),
@@ -566,6 +620,10 @@ fn main() {
     on(&st.ui.stop, "click", move |_| spawn_local(stop(a.clone())));
     let a = app.clone();
     on(&st.ui.snapshot, "click", move |_| snapshot(&a));
+    let a = app.clone();
+    on(&st.ui.diag, "click", move |_| {
+        spawn_local(diagnostics(a.clone()))
+    });
     let a = app.clone();
     let order = st.ui.order.clone();
     on(&st.ui.order, "change", move |_| {
