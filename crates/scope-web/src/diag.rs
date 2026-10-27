@@ -18,8 +18,8 @@ use crate::usb;
 
 /// Start of the uploaded firmware in the chip's memory map.
 const FIRMWARE_BASE: u16 = 0x8000;
-/// Dump the ROM, the firmware RAM and the variable area above it.
-const DUMP_END: u32 = 0xA000;
+/// End of the boot ROM (exclusive).
+const ROM_END: u32 = 0x8000;
 
 pub fn describe(dev: &UsbDevice) -> Vec<String> {
     let mut lines = vec![format!(
@@ -83,24 +83,49 @@ fn looks_like_vectors(b: &[u8]) -> bool {
     b.len() >= 4 && is_jump(b[0]) && (is_jump(b[3]) || b[3] == 0x32 || b[3] == 0xFF)
 }
 
-async fn read(dev: &UsbDevice, addr: u16, len: u16) -> Result<Vec<u8>, String> {
-    usb::ctrl_in(dev, req::CAPABILITY, 0, addr, len).await
+/// Request 0x01 returns one byte of memory at `wIndex`, whatever `wLength` says.
+async fn read_byte(dev: &UsbDevice, addr: u16) -> Result<u8, String> {
+    let b = usb::ctrl_in(dev, req::CAPABILITY, 0, addr, 1).await?;
+    b.first()
+        .copied()
+        .ok_or_else(|| format!("empty read at {addr:04x}"))
 }
 
-/// Probe, then dump code memory. Calls `progress` with log lines.
+async fn read_bytes(dev: &UsbDevice, addrs: &[u16]) -> Result<Vec<u8>, String> {
+    let mut out = Vec::with_capacity(addrs.len());
+    for &a in addrs {
+        out.push(read_byte(dev, a).await?);
+    }
+    Ok(out)
+}
+
+/// Probe, then dump the boot ROM one byte at a time. Calls `progress` with log lines.
 pub async fn dump(dev: &UsbDevice, mut progress: impl FnMut(&str)) -> Result<Vec<u8>, String> {
-    let fw = read(dev, FIRMWARE_BASE, 8).await?;
-    progress(&format!("Read @8000: {}", hex(&fw)));
-    if !fw.starts_with(&MAGIC[..4]) {
+    let header = read_bytes(
+        dev,
+        &[
+            FIRMWARE_BASE,
+            FIRMWARE_BASE + 1,
+            FIRMWARE_BASE + 2,
+            FIRMWARE_BASE + 3,
+        ],
+    )
+    .await?;
+    progress(&format!("Read @8000..8003: {}", hex(&header)));
+    if header != MAGIC[..4] {
         return Err(
             "request 0x01 did not return the firmware header at 0x8000; \
                     not dumping. Please send this log."
                 .into(),
         );
     }
-    let vec0 = read(dev, 0x0000, 8).await?;
-    progress(&format!("Read @0000: {}", hex(&vec0)));
-    if !looks_like_vectors(&vec0) {
+
+    // Only 0x0000 (which the vendor software itself reads) and 0x0003 are
+    // touched before we know which address space this is.
+    let v0 = read_byte(dev, 0x0000).await?;
+    let v3 = read_byte(dev, 0x0003).await?;
+    progress(&format!("Read @0000: {v0:02x}, @0003: {v3:02x}"));
+    if !looks_like_vectors(&[v0, 0, 0, v3]) {
         return Err(
             "0x0000 does not look like 8051 code, so request 0x01 may be reading \
                     hardware registers; stopped for safety. Please send this log."
@@ -108,29 +133,19 @@ pub async fn dump(dev: &UsbDevice, mut progress: impl FnMut(&str)) -> Result<Vec
         );
     }
 
-    // Find the largest read size the ROM honours.
-    let mut step: u16 = 8;
-    for size in [64u16, 32, 16] {
-        if let Ok(b) = read(dev, 0x0000, size).await {
-            if b.len() == size as usize && b[..8] == vec0[..] {
-                step = size;
-                break;
-            }
-        }
-    }
-    progress(&format!("Reading {step} bytes per request"));
-
-    let mut out = Vec::with_capacity(DUMP_END as usize);
-    let mut addr: u32 = 0;
-    while addr < DUMP_END {
-        let b = read(dev, addr as u16, step).await?;
-        if b.len() != step as usize {
-            return Err(format!("short read at {addr:04x}: {} bytes", b.len()));
-        }
-        out.extend_from_slice(&b);
-        addr += step as u32;
-        if addr.is_multiple_of(0x1000) {
-            progress(&format!("Dumped {:04x} of {:04x}", addr, DUMP_END));
+    let start = js_sys::Date::now();
+    let mut out = Vec::with_capacity(ROM_END as usize);
+    for addr in 0..ROM_END {
+        out.push(read_byte(dev, addr as u16).await?);
+        let done = addr + 1;
+        if done.is_multiple_of(0x800) {
+            let secs = (js_sys::Date::now() - start) / 1000.0;
+            let remaining = secs / done as f64 * (ROM_END - done) as f64;
+            progress(&format!(
+                "Dumped {done:04x} of {ROM_END:04x} ({}%), about {:.0} s left",
+                done * 100 / ROM_END,
+                remaining
+            ));
         }
     }
     Ok(out)

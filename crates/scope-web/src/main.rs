@@ -431,7 +431,10 @@ async fn diagnostics(app: App) {
     for line in diag::describe(&dev) {
         log(&app, &line);
     }
-    log(&app, "Reading the bridge chip's ROM (about a minute)…");
+    log(
+        &app,
+        "Reading the bridge chip's ROM, one byte at a time (a few minutes)…",
+    );
     let result = diag::dump(&dev, |msg| log(&app, msg)).await;
     match result {
         Ok(bytes) => {
