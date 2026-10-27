@@ -4,12 +4,12 @@ A browser viewer for the AVEO Cheetah3 USB microscope (USB ID `1871:01b0`), sold
 
 ## Using it
 
-1. Open the hosted page in **Chrome or Edge** on a **Chromebook, Linux or macOS** computer. Firefox and Safari have no WebUSB.
-
-> **Windows:** Chromium's WebUSB on Windows does not implement isochronous transfers, which this microscope uses for video. Connecting and sending commands works, but streaming fails with "A transfer error has occurred". A Windows route (a small native helper, or open firmware that streams over a bulk endpoint) is planned.
-2. **Windows only, once (for the planned Windows route):** install [Zadig](https://zadig.akeo.ie/), choose *Options → List All Devices*, select `1871 01B0`, pick **WinUSB** and press *Replace Driver*. On Linux, add a udev rule for `1871:01b0`; macOS needs nothing extra.
+1. Open the hosted page in a Chromium browser (Chrome, Edge, Brave) on Windows, a Chromebook, Linux or macOS. Firefox and Safari have no WebUSB.
+2. **Windows only, once:** install [Zadig](https://zadig.akeo.ie/), choose *Options → List All Devices*, select `1871 01B0`, pick **WinUSB** and press *Replace Driver*. On Linux, add a udev rule for `1871:01b0`; macOS needs nothing extra.
 3. **Load the firmware, once:** choose a driver file from the original CD. The page searches it for the firmware image and remembers it in this browser only.
-4. Press **Connect**, select the microscope, then **Start**.
+4. Press **Connect**, select the microscope, then **Start**. On Windows the microscope restarts itself after the firmware upload, and the browser then sees it as a new device: press **Connect** and select it a second time.
+
+> **Why Windows is different:** Chromium's WebUSB on Windows does not implement isochronous transfers, which the microscope uses for video. On Windows the page therefore patches the firmware, in memory, to stream over a bulk endpoint instead. The boot ROM's USB descriptors describe only the isochronous endpoint, so after the upload the firmware detaches from the bus and reattaches with a descriptor of its own, and the computer enumerates it afresh. Add `?bulk` to the page address to use the bulk route on other systems too. See `docs/FIRMWARE_NOTES.md`.
 
 ## Why the firmware step exists
 
@@ -37,7 +37,7 @@ The page reports whether an image matches the reference SHA-256 from kswit's pub
 | Capture | vendor OUT `0x22` | `(1, 2)` start, `(0, 0)` stop |
 | Image | vendor OUT `0x5c`–`0x73` | exposure, gain, brightness, contrast, sharpness, saturation |
 
-Frames begin with the marker `00 FF FF FF` and a 10-byte header, followed by packed UYVY 4:2:2 pixels. Within this context, 640 × 480 at 30 fps fits the isochronous bandwidth, while full 1280 × 1024 does not and is offered only as an experiment.
+Frames begin with the marker `00 FF FF FF` and a header (10 bytes on the isochronous endpoint per kswit's driver, 6 bytes measured on the bulk endpoint), followed by packed UYVY 4:2:2 pixels. Within this context, 640 × 480 at 30 fps fits the isochronous bandwidth, while full 1280 × 1024 does not and is offered only as an experiment.
 
 All commands are sent with the *device* recipient. In contrast to the interface and endpoint recipients, WebUSB does not check `wIndex` for device requests, which matters because the firmware chunk numbers would otherwise be rejected.
 
@@ -68,7 +68,7 @@ Push to `main` on GitHub, then set *Settings → Pages → Source* to **GitHub A
 
 ## Known limitations
 
-- Video streaming does not work in Chrome or Edge on Windows (no isochronous support in Chromium's Windows backend).
+- On Windows, Connect must be pressed twice (the browser forgets the microscope when it reconnects for bulk video, because it has no serial number). The bulk route has been tested at 640 × 480 only.
 - Auto exposure starts dark and can take up to half a minute to settle.
 - Control ranges are inferred from the vendor defaults and have yet to be confirmed.
 - The LED is controlled by the physical switch on the microscope.

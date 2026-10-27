@@ -5,7 +5,7 @@ use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 use web_sys::{
     UsbControlTransferParameters, UsbDevice, UsbDeviceFilter, UsbDeviceRequestOptions,
-    UsbRecipient, UsbRequestType, UsbTransferStatus,
+    UsbDirection, UsbEndpointType, UsbRecipient, UsbRequestType, UsbTransferStatus,
 };
 
 fn err(e: JsValue) -> String {
@@ -44,6 +44,45 @@ pub async fn request_device() -> Result<UsbDevice, String> {
     filter.set_product_id(protocol::PRODUCT_ID);
     let opts = UsbDeviceRequestOptions::new(&[filter]);
     usb().request_device(&opts).await.map_err(err)
+}
+
+/// Whether the active configuration has bulk IN endpoint 3, i.e. the
+/// bulk-video firmware is running and the host has enumerated it.
+pub fn has_bulk_video(dev: &UsbDevice) -> bool {
+    let Some(cfg) = dev.configuration() else {
+        return false;
+    };
+    cfg.interfaces().iter().any(|iface| {
+        iface.alternates().iter().any(|alt| {
+            alt.endpoints().iter().any(|e| {
+                e.endpoint_number() == protocol::ISO_ENDPOINT
+                    && e.direction() == UsbDirection::In
+                    && e.type_() == UsbEndpointType::Bulk
+            })
+        })
+    })
+}
+
+/// After a reconnect, find the microscope again among the devices this page
+/// may already use. Chrome may drop the permission for a device without a
+/// serial number when it disconnects, in which case this times out.
+pub async fn wait_for_bulk_device(timeout_ms: u32) -> Option<UsbDevice> {
+    let mut waited = 0;
+    while waited < timeout_ms {
+        sleep(250).await;
+        waited += 250;
+        let Ok(devices) = usb().get_devices().await else {
+            continue;
+        };
+        if let Some(dev) = devices.iter().find(|d| {
+            d.vendor_id() == protocol::VENDOR_ID
+                && d.product_id() == protocol::PRODUCT_ID
+                && has_bulk_video(d)
+        }) {
+            return Some(dev);
+        }
+    }
+    None
 }
 
 pub fn on_disconnect(mut f: impl FnMut(UsbDevice) + 'static) {
@@ -153,31 +192,69 @@ pub async fn read_version(dev: &UsbDevice) -> Result<Vec<u8>, String> {
     ctrl_in(dev, req::VERSION, 0, 0, 12).await
 }
 
+/// Upload and boot. The chunks go last to first: if firmware is already
+/// running (say, after a page reload), a patched image then has its appended
+/// code in place before the chunks that redirect the running interrupt
+/// handler into it, and the vectors in chunk 0 change last.
 pub async fn upload_firmware(dev: &UsbDevice, image: &[u8]) -> Result<(), String> {
-    for (i, chunk) in image.chunks_exact(protocol::FIRMWARE_CHUNK_LEN).enumerate() {
+    let chunks: Vec<&[u8]> = image.chunks_exact(protocol::FIRMWARE_CHUNK_LEN).collect();
+    for (i, chunk) in chunks.iter().enumerate().rev() {
         ctrl_out_data(dev, req::FIRMWARE_CHUNK, 0, i as u16, chunk).await?;
     }
     ctrl_out(dev, &protocol::BOOT_REQUEST).await
 }
 
-pub async fn start_stream(dev: &UsbDevice, resolution: Resolution) -> Result<(), String> {
-    dev.select_alternate_interface(protocol::INTERFACE, protocol::STREAM_ALT_SETTING)
-        .await
-        .map_err(err)?;
+/// Ask the bulk-video firmware to detach and reattach (see
+/// `scope_core::patch::RECONNECT_REQUEST`). The device completes the request
+/// before it detaches, but a failure here is not conclusive either way.
+pub async fn request_reconnect(dev: &UsbDevice) -> Result<(), String> {
+    ctrl_out(
+        dev,
+        &Request::new(scope_core::patch::RECONNECT_REQUEST, 0, 0, 0),
+    )
+    .await
+}
+
+/// `bulk`: the bulk-video firmware has a single alternate setting, so there
+/// is no bandwidth to select.
+pub async fn start_stream(
+    dev: &UsbDevice,
+    resolution: Resolution,
+    bulk: bool,
+) -> Result<(), String> {
+    if !bulk {
+        dev.select_alternate_interface(protocol::INTERFACE, protocol::STREAM_ALT_SETTING)
+            .await
+            .map_err(err)?;
+    }
     for r in protocol::start_sequence(resolution) {
         ctrl_out(dev, &r).await?;
     }
     Ok(())
 }
 
-pub async fn stop_stream(dev: &UsbDevice) -> Result<(), String> {
+pub async fn stop_stream(dev: &UsbDevice, bulk: bool) -> Result<(), String> {
     for r in protocol::stop_sequence() {
         ctrl_out(dev, &r).await?;
     }
-    dev.select_alternate_interface(protocol::INTERFACE, protocol::IDLE_ALT_SETTING)
+    if !bulk {
+        dev.select_alternate_interface(protocol::INTERFACE, protocol::IDLE_ALT_SETTING)
+            .await
+            .map_err(err)?;
+    }
+    Ok(())
+}
+
+/// One bulk IN transfer from the video endpoint.
+pub async fn bulk_in(dev: &UsbDevice, len: u32) -> Result<Vec<u8>, String> {
+    let res = dev
+        .transfer_in(protocol::ISO_ENDPOINT, len)
         .await
         .map_err(err)?;
-    Ok(())
+    if res.status() != UsbTransferStatus::Ok {
+        return Err(format!("bulk transfer status {:?}", res.status()));
+    }
+    Ok(res.data().map(|dv| view_bytes(&dv)).unwrap_or_default())
 }
 
 pub fn packet_lengths(n: usize) -> Vec<js_sys::Number> {

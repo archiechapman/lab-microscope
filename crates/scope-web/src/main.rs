@@ -1,7 +1,9 @@
 //! Browser front end for the AVEO Cheetah3 USB microscope.
 //!
 //! Talks to the device directly over WebUSB (Chromium browsers only). On
-//! Windows the device must first be bound to the WinUSB driver (see README).
+//! Windows the device must first be bound to the WinUSB driver (see README),
+//! and because Chromium there has no isochronous transfers, the firmware is
+//! patched to stream over a bulk endpoint instead (`scope_core::patch`).
 
 mod diag;
 mod usb;
@@ -11,6 +13,7 @@ use std::collections::VecDeque;
 use std::rc::Rc;
 
 use scope_core::firmware::CONFIRMED_AGAINST_VENDOR_MEDIA;
+use scope_core::frame::BULK_HEADER_LEN;
 use scope_core::protocol::{self, Resolution};
 use scope_core::{yuv422_to_rgba, ByteOrder, Control, Firmware, FrameAssembler};
 use wasm_bindgen::prelude::*;
@@ -26,6 +29,21 @@ const FW_STORAGE_KEY: &str = "lab-microscope.firmware.v1";
 const TRANSFERS_IN_FLIGHT: usize = 6;
 /// Packets (microframes, 125 µs each) per transfer.
 const PACKETS_PER_TRANSFER: usize = 32;
+/// Bulk transfers kept queued at once. With fewer than several in flight the
+/// bridge's FIFO overflows between transfers and frames come up short.
+const BULK_TRANSFERS_IN_FLIGHT: usize = 8;
+const BULK_TRANSFER_LEN: u32 = 64 * 1024;
+/// How long to look for the microscope after asking it to reconnect. It is
+/// back within about a second; Chrome usually forgets it anyway.
+const RECONNECT_WAIT_MS: u32 = 3000;
+
+/// How video leaves the device: the vendor firmware's isochronous endpoint,
+/// or the patched firmware's bulk endpoint (needed on Windows).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Transport {
+    Iso,
+    Bulk,
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Phase {
@@ -60,6 +78,10 @@ struct State {
     /// Device that has received firmware since it was plugged in.
     fw_uploaded_to: Option<UsbDevice>,
     device: Option<UsbDevice>,
+    transport: Transport,
+    /// Set while the device is asked to drop off the bus and come back, so
+    /// that its disconnect is not reported as an unplug.
+    reconnecting: bool,
     /// Incremented each time streaming starts, so stale loops can tell they are stale.
     generation: u32,
     assembler: FrameAssembler,
@@ -193,10 +215,24 @@ async fn on_firmware_file(app: App, input: HtmlInputElement) {
 
 async fn connect(app: App) {
     set_phase(&app, Phase::Busy, "Connecting…");
-    match try_connect(&app).await {
-        Ok(dev) => {
-            app.borrow_mut().device = Some(dev);
+    let result = try_connect(&app).await;
+    app.borrow_mut().reconnecting = false;
+    match result {
+        Ok(Some((dev, transport))) => {
+            {
+                let mut st = app.borrow_mut();
+                st.device = Some(dev);
+                st.transport = transport;
+            }
             set_phase(&app, Phase::Ready, "Ready");
+        }
+        Ok(None) => {
+            log(
+                &app,
+                "The microscope has restarted with its bulk video endpoint. The browser \
+                 treats it as a new device, so press Connect and choose it once more.",
+            );
+            set_phase(&app, Phase::Disconnected, "Press Connect again");
         }
         Err(e) => {
             log(&app, &format!("Connect failed: {e}"));
@@ -205,7 +241,18 @@ async fn connect(app: App) {
     }
 }
 
-async fn try_connect(app: &App) -> Result<UsbDevice, String> {
+/// Use the bulk endpoint where isochronous transfers are unavailable
+/// (Chromium on Windows), or anywhere with `?bulk` in the page address.
+fn want_bulk() -> bool {
+    is_windows()
+        || web_sys::window()
+            .and_then(|w| w.location().search().ok())
+            .is_some_and(|q| q.contains("bulk"))
+}
+
+/// `Ok(None)`: the device reconnected for bulk video, but the browser forgot
+/// its permission (it has no serial number), so the user must pick it again.
+async fn try_connect(app: &App) -> Result<Option<(UsbDevice, Transport)>, String> {
     let dev = usb::request_device().await?;
     log(
         app,
@@ -218,6 +265,10 @@ async fn try_connect(app: &App) -> Result<UsbDevice, String> {
     for line in diag::describe(&dev) {
         log(app, &line);
     }
+    if usb::has_bulk_video(&dev) {
+        log(app, "Bulk-video firmware already running");
+        return Ok(Some((dev, Transport::Bulk)));
+    }
 
     // The boot ROM may answer the version request with the same string as the
     // firmware (kswit's tested kernel driver uploads even when it matches), so
@@ -228,12 +279,13 @@ async fn try_connect(app: &App) -> Result<UsbDevice, String> {
         app,
         &format!("Device reports {:?}", String::from_utf8_lossy(&before)),
     );
-    if app.borrow().fw_uploaded_to.as_ref() == Some(&dev) {
+    let bulk = want_bulk();
+    if !bulk && app.borrow().fw_uploaded_to.as_ref() == Some(&dev) {
         log(
             app,
             "Firmware already uploaded since this device was plugged in",
         );
-        return Ok(dev);
+        return Ok(Some((dev, Transport::Iso)));
     }
 
     let fw = app
@@ -243,16 +295,17 @@ async fn try_connect(app: &App) -> Result<UsbDevice, String> {
         .ok_or("the microscope needs its firmware; load it from the CD first")?;
     // Add the code-memory reader used by Diagnostics. It only takes over the
     // unused request 0xA0, so normal operation is unaffected.
-    let image = match scope_core::patch::with_code_reader(fw.bytes()) {
-        Some(patched) => {
-            log(app, "Uploading firmware (with diagnostics patch)…");
-            patched
-        }
-        None => {
-            log(app, "Uploading firmware…");
-            fw.bytes().to_vec()
-        }
+    let mut image = match scope_core::patch::with_code_reader(fw.bytes()) {
+        Some(patched) => patched,
+        None => fw.bytes().to_vec(),
     };
+    if bulk {
+        image = scope_core::patch::with_bulk_video(&image)
+            .ok_or("this firmware image cannot be patched for bulk video, which Windows needs")?;
+        log(app, "Uploading firmware (patched for bulk video)…");
+    } else {
+        log(app, "Uploading firmware…");
+    }
     usb::upload_firmware(&dev, &image).await?;
     app.borrow_mut().fw_uploaded_to = Some(dev.clone());
     let version = usb::read_version(&dev).await?;
@@ -266,7 +319,29 @@ async fn try_connect(app: &App) -> Result<UsbDevice, String> {
         app,
         &format!("Firmware running: {}", String::from_utf8_lossy(&version)),
     );
-    Ok(dev)
+    if !bulk {
+        return Ok(Some((dev, Transport::Iso)));
+    }
+
+    // The host still holds the boot ROM's descriptors, which describe only
+    // isochronous endpoints. The firmware drops off the bus and comes back,
+    // and the host then reads its bulk descriptor.
+    log(
+        app,
+        "Reconnecting so the computer sees the bulk video endpoint…",
+    );
+    app.borrow_mut().reconnecting = true;
+    if let Err(e) = usb::request_reconnect(&dev).await {
+        log(app, &format!("Reconnect request: {e} (waiting anyway)"));
+    }
+    match usb::wait_for_bulk_device(RECONNECT_WAIT_MS).await {
+        Some(dev) => {
+            usb::open(&dev).await?;
+            log(app, "Reconnected with the bulk video endpoint");
+            Ok(Some((dev, Transport::Bulk)))
+        }
+        None => Ok(None),
+    }
 }
 
 async fn start(app: App) {
@@ -278,7 +353,9 @@ async fn start(app: App) {
         "sxga" => Resolution::SXGA,
         _ => Resolution::VGA,
     };
-    if let Err(e) = usb::start_stream(&dev, resolution).await {
+    let transport = app.borrow().transport;
+    let bulk = transport == Transport::Bulk;
+    if let Err(e) = usb::start_stream(&dev, resolution, bulk).await {
         log(&app, &format!("Start failed: {e}"));
         set_phase(&app, Phase::Ready, "Ready");
         return;
@@ -288,7 +365,11 @@ async fn start(app: App) {
         let mut st = app.borrow_mut();
         st.generation += 1;
         st.resolution = resolution;
-        st.assembler = FrameAssembler::new(resolution.frame_bytes());
+        st.assembler = if bulk {
+            FrameAssembler::with_header_len(resolution.frame_bytes(), BULK_HEADER_LEN)
+        } else {
+            FrameAssembler::new(resolution.frame_bytes())
+        };
         st.rgba = vec![0; resolution.width as usize * resolution.height as usize * 4];
         st.frame_times.clear();
         st.ui.canvas.set_width(resolution.width as u32);
@@ -299,12 +380,20 @@ async fn start(app: App) {
     log(
         &app,
         &format!(
-            "Streaming {}×{}. Auto exposure can take a while to settle.",
-            resolution.width, resolution.height
+            "Streaming {}×{} over {}. Auto exposure can take a while to settle.",
+            resolution.width,
+            resolution.height,
+            if bulk { "bulk" } else { "isochronous" }
         ),
     );
-    for _ in 0..TRANSFERS_IN_FLIGHT {
-        spawn_local(iso_loop(app.clone(), dev.clone(), generation));
+    if bulk {
+        for _ in 0..BULK_TRANSFERS_IN_FLIGHT {
+            spawn_local(bulk_loop(app.clone(), dev.clone(), generation));
+        }
+    } else {
+        for _ in 0..TRANSFERS_IN_FLIGHT {
+            spawn_local(iso_loop(app.clone(), dev.clone(), generation));
+        }
     }
 }
 
@@ -335,10 +424,29 @@ async fn iso_loop(app: App, dev: UsbDevice, generation: u32) {
                         log(
                             &app,
                             "Chrome and Edge on Windows do not implement isochronous USB \
-                             transfers, which this microscope uses for video. Use a \
-                             Chromebook, Linux or macOS, or see the README for planned Windows support.",
+                             transfers. Unplug the microscope, plug it back in and connect \
+                             again; the page then uses the bulk endpoint instead.",
                         );
                     }
+                    spawn_local(stop(app.clone()));
+                }
+                return;
+            }
+        }
+    }
+}
+
+async fn bulk_loop(app: App, dev: UsbDevice, generation: u32) {
+    while is_current(&app, generation) {
+        match usb::bulk_in(&dev, BULK_TRANSFER_LEN).await {
+            Ok(data) => {
+                if is_current(&app, generation) {
+                    handle_packets(&app, &[data]);
+                }
+            }
+            Err(e) => {
+                if is_current(&app, generation) {
+                    log(&app, &format!("Stream error: {e}"));
                     spawn_local(stop(app.clone()));
                 }
                 return;
@@ -398,7 +506,8 @@ async fn stop(app: App) {
     }
     set_phase(&app, Phase::Busy, "Stopping…");
     usb::sleep(50).await; // let in-flight transfers drain
-    if let Err(e) = usb::stop_stream(&dev).await {
+    let bulk = app.borrow().transport == Transport::Bulk;
+    if let Err(e) = usb::stop_stream(&dev, bulk).await {
         log(&app, &format!("Stop: {e}"));
     }
     set_phase(&app, Phase::Ready, "Ready");
@@ -408,6 +517,10 @@ fn on_disconnect(app: &App, dev: &UsbDevice) {
     let ours = app.borrow().device.as_ref().is_some_and(|d| d == dev);
     if app.borrow().fw_uploaded_to.as_ref() == Some(dev) {
         app.borrow_mut().fw_uploaded_to = None;
+    }
+    if app.borrow().reconnecting {
+        // Expected: the firmware is re-enumerating with its bulk endpoint.
+        return;
     }
     if ours {
         app.borrow_mut().device = None;
@@ -592,6 +705,8 @@ fn main() {
         firmware: None,
         fw_uploaded_to: None,
         device: None,
+        transport: Transport::Iso,
+        reconnecting: false,
         generation: 0,
         assembler: FrameAssembler::new(Resolution::VGA.frame_bytes()),
         rgba: Vec::new(),

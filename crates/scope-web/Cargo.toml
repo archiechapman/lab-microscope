@@ -15,7 +15,7 @@ console_error_panic_hook = "0.1"
 [dependencies.web-sys]
 version = "0.3"
 features = [
-  "console", "Window", "Document", "Element", "HtmlElement", "Navigator",
+  "console", "Window", "Location", "Document", "Element", "HtmlElement", "Navigator",
   "HtmlCanvasElement", "CanvasRenderingContext2d", "ImageData",
   "HtmlInputElement", "HtmlButtonElement", "HtmlSelectElement", "HtmlAnchorElement",
   "Event", "EventTarget", "File", "FileList", "Blob", "BlobPropertyBag", "Url", "Storage",

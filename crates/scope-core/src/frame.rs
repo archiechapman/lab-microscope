@@ -1,11 +1,15 @@
-//! Reassembles video frames from isochronous packet payloads.
+//! Reassembles video frames from isochronous or bulk payloads.
 //!
 //! Stream layout: each frame starts with the marker `00 FF FF FF`, then a
-//! 10-byte header (contents not yet decoded), then `width * height * 2`
-//! bytes of packed YUV 4:2:2.
+//! header, then `width * height * 2` bytes of packed YUV 4:2:2.
 
 pub const SYNC: [u8; 4] = [0x00, 0xFF, 0xFF, 0xFF];
+/// Header length on the isochronous endpoint, from kswit's driver.
 pub const HEADER_LEN: usize = 10;
+/// Header length on the bulk endpoint of the patched firmware, measured.
+/// At 640 × 480 it reads `ff b0 e0 01 80 02`: `ff`, an unknown byte, then
+/// height (`0x01e0`) and width (`0x0280`) little-endian.
+pub const BULK_HEADER_LEN: usize = 6;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct FrameStats {
@@ -20,6 +24,7 @@ pub struct FrameAssembler {
     pos: usize,
     synced: bool,
     skip: usize,
+    header_len: usize,
     /// Last bytes of the previous payload, to catch a marker split across packets.
     tail: Vec<u8>,
     pub stats: FrameStats,
@@ -30,12 +35,18 @@ fn find_sync(data: &[u8]) -> Option<usize> {
 }
 
 impl FrameAssembler {
+    /// For the isochronous stream ([`HEADER_LEN`]).
     pub fn new(frame_bytes: usize) -> Self {
+        Self::with_header_len(frame_bytes, HEADER_LEN)
+    }
+
+    pub fn with_header_len(frame_bytes: usize, header_len: usize) -> Self {
         Self {
             buf: vec![0; frame_bytes],
             pos: 0,
             synced: false,
             skip: 0,
+            header_len,
             tail: Vec::with_capacity(3),
             stats: FrameStats::default(),
         }
@@ -114,7 +125,7 @@ impl FrameAssembler {
         }
         self.synced = true;
         self.pos = 0;
-        self.skip = HEADER_LEN;
+        self.skip = self.header_len;
     }
 
     fn append(&mut self, data: &[u8], on_frame: &mut impl FnMut(&[u8])) {
@@ -178,6 +189,28 @@ mod tests {
                 assert_eq!(data, &want, "packet len {len} frame {f}");
             }
         }
+    }
+
+    #[test]
+    fn bulk_header_length() {
+        let fb = 32;
+        let mut s = Vec::new();
+        for f in 0..2u8 {
+            s.extend_from_slice(&SYNC);
+            s.extend_from_slice(&[0xFF, 0xB0, 0x10, 0x00, 0x08, 0x00]);
+            s.extend_from_slice(&[f + 1; 32]);
+        }
+        s.extend_from_slice(&SYNC);
+        let mut a = FrameAssembler::with_header_len(fb, BULK_HEADER_LEN);
+        let mut out = Vec::new();
+        for p in s.chunks(512) {
+            a.push(p, |f| out.push(f.to_vec()));
+        }
+        assert_eq!(out, vec![vec![1; 32], vec![2; 32]]);
+        assert_eq!(a.stats.dropped, 0);
+        // The isochronous header length drops every frame of this stream.
+        let mut a = FrameAssembler::new(fb);
+        a.push(&s, |_| panic!("frame with wrong header length"));
     }
 
     #[test]
