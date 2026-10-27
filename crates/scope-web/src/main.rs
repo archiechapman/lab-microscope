@@ -55,6 +55,8 @@ struct State {
     ui: Ui,
     phase: Phase,
     firmware: Option<Firmware>,
+    /// Device that has received firmware since it was plugged in.
+    fw_uploaded_to: Option<UsbDevice>,
     device: Option<UsbDevice>,
     /// Incremented each time streaming starts, so stale loops can tell they are stale.
     generation: u32,
@@ -211,9 +213,20 @@ async fn try_connect(app: &App) -> Result<UsbDevice, String> {
     );
     usb::open(&dev).await?;
 
-    let version = usb::read_version(&dev).await.unwrap_or_default();
-    if version.as_slice() == protocol::FIRMWARE_VERSION {
-        log(app, "Firmware already running");
+    // The boot ROM may answer the version request with the same string as the
+    // firmware (kswit's tested kernel driver uploads even when it matches), so
+    // the version cannot tell us whether firmware is loaded. Upload once per
+    // plug-in; the same UsbDevice object persists until it is unplugged.
+    let before = usb::read_version(&dev).await.unwrap_or_default();
+    log(
+        app,
+        &format!("Device reports {:?}", String::from_utf8_lossy(&before)),
+    );
+    if app.borrow().fw_uploaded_to.as_ref() == Some(&dev) {
+        log(
+            app,
+            "Firmware already uploaded since this device was plugged in",
+        );
         return Ok(dev);
     }
 
@@ -224,6 +237,7 @@ async fn try_connect(app: &App) -> Result<UsbDevice, String> {
         .ok_or("the microscope needs its firmware; load it from the CD first")?;
     log(app, "Uploading firmware…");
     usb::upload_firmware(&dev, &fw).await?;
+    app.borrow_mut().fw_uploaded_to = Some(dev.clone());
     let version = usb::read_version(&dev).await?;
     if version.as_slice() != protocol::FIRMWARE_VERSION {
         return Err(format!(
@@ -277,6 +291,12 @@ async fn start(app: App) {
     }
 }
 
+fn is_windows() -> bool {
+    web_sys::window()
+        .and_then(|w| w.navigator().user_agent().ok())
+        .is_some_and(|ua| ua.contains("Windows"))
+}
+
 fn is_current(app: &App, generation: u32) -> bool {
     let st = app.borrow();
     st.phase == Phase::Streaming && st.generation == generation
@@ -294,6 +314,14 @@ async fn iso_loop(app: App, dev: UsbDevice, generation: u32) {
             Err(e) => {
                 if is_current(&app, generation) {
                     log(&app, &format!("Stream error: {e}"));
+                    if is_windows() {
+                        log(
+                            &app,
+                            "Chrome and Edge on Windows do not implement isochronous USB \
+                             transfers, which this microscope uses for video. Use a \
+                             Chromebook, Linux or macOS, or see the README for planned Windows support.",
+                        );
+                    }
                     spawn_local(stop(app.clone()));
                 }
                 return;
@@ -361,6 +389,9 @@ async fn stop(app: App) {
 
 fn on_disconnect(app: &App, dev: &UsbDevice) {
     let ours = app.borrow().device.as_ref().is_some_and(|d| d == dev);
+    if app.borrow().fw_uploaded_to.as_ref() == Some(dev) {
+        app.borrow_mut().fw_uploaded_to = None;
+    }
     if ours {
         app.borrow_mut().device = None;
         log(
@@ -491,6 +522,7 @@ fn main() {
         ui,
         phase: Phase::Disconnected,
         firmware: None,
+        fw_uploaded_to: None,
         device: None,
         generation: 0,
         assembler: FrameAssembler::new(Resolution::VGA.frame_bytes()),

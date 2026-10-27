@@ -4,8 +4,10 @@ A browser viewer for the AVEO Cheetah3 USB microscope (USB ID `1871:01b0`), sold
 
 ## Using it
 
-1. Open the hosted page in **Chrome or Edge** on a desktop computer. Firefox and Safari have no WebUSB.
-2. **Windows only, once:** install [Zadig](https://zadig.akeo.ie/), choose *Options → List All Devices*, select `1871 01B0`, pick **WinUSB** and press *Replace Driver*. On Linux, add a udev rule for `1871:01b0`; macOS needs nothing extra.
+1. Open the hosted page in **Chrome or Edge** on a **Chromebook, Linux or macOS** computer. Firefox and Safari have no WebUSB.
+
+> **Windows:** Chromium's WebUSB on Windows does not implement isochronous transfers, which this microscope uses for video. Connecting and sending commands works, but streaming fails with "A transfer error has occurred". A Windows route (a small native helper, or open firmware that streams over a bulk endpoint) is planned.
+2. **Windows only, once (for the planned Windows route):** install [Zadig](https://zadig.akeo.ie/), choose *Options → List All Devices*, select `1871 01B0`, pick **WinUSB** and press *Replace Driver*. On Linux, add a udev rule for `1871:01b0`; macOS needs nothing extra.
 3. **Load the firmware, once:** choose a driver file from the original CD. The page searches it for the firmware image and remembers it in this browser only.
 4. Press **Connect**, select the microscope, then **Start**.
 
@@ -66,6 +68,7 @@ Push to `main` on GitHub, then set *Settings → Pages → Source* to **GitHub A
 
 ## Known limitations
 
+- Video streaming does not work in Chrome or Edge on Windows (no isochronous support in Chromium's Windows backend).
 - Auto exposure starts dark and can take up to half a minute to settle.
 - Control ranges are inferred from the vendor defaults and have yet to be confirmed.
 - The LED is controlled by the physical switch on the microscope.
