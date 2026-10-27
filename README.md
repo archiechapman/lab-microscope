@@ -9,7 +9,7 @@ A browser viewer for the AVEO Cheetah3 USB microscope (USB ID `1871:01b0`), sold
 3. **Load the firmware, once:** choose a driver file from the original CD. The page searches it for the firmware image and remembers it in this browser only.
 4. Press **Connect**, select the microscope, then **Start**. On Windows the microscope restarts itself after the firmware upload, and the browser then sees it as a new device: press **Connect** and select it a second time.
 
-> **Why Windows is different:** Chromium's WebUSB on Windows does not implement isochronous transfers, which the microscope uses for video. On Windows the page therefore patches the firmware, in memory, to stream over a bulk endpoint instead. The boot ROM's USB descriptors describe only the isochronous endpoint, so after the upload the firmware detaches from the bus and reattaches with a descriptor of its own, and the computer enumerates it afresh. Add `?bulk` to the page address to use the bulk route on other systems too. See `docs/FIRMWARE_NOTES.md`.
+> **Why Windows is different:** Chromium's WebUSB on Windows does not implement isochronous transfers, which the microscope uses for video. On Windows the page therefore patches the firmware, in memory, to stream over a bulk endpoint instead. The boot ROM's USB descriptors describe only the isochronous endpoint, so after the upload the firmware detaches from the bus and reattaches with a descriptor of its own, and the computer enumerates it afresh. Add `?bulk` to the page address to use the bulk route on other systems too.
 
 ## Why the firmware step exists
 
